@@ -6,22 +6,23 @@
 <title>日切放行</title>
 <script src="/static/vue.global.prod.js"></script>
 <style>
-  :root{--bg:#0b1220;--panel:#121a2b;--line:#243049;--text:#e8eefc;--muted:#93a0b8;--ok:#3ddc97;--bad:#ff6b6b;--accent:#4cc9f0}
+  :root{--bg:#0b1220;--panel:#121a2b;--line:#243049;--text:#e8eefc;--muted:#93a0b8;--ok:#3ddc97;--bad:#ff6b6b;--accent:#4cc9f0;--warn:#ffb454}
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
   .top{display:flex;align-items:center;gap:18px;padding:14px 20px;border-bottom:1px solid var(--line);background:#0e1626}
   .brand{font-weight:700;letter-spacing:.08em;font-size:18px}
   .brand small{display:block;color:var(--muted);font-weight:400;font-size:11px;letter-spacing:.02em;margin-top:2px}
-  .tabs{display:flex;gap:6px;flex:1}
+  .tabs{display:flex;gap:6px;flex:1;flex-wrap:wrap}
   .tabs button{background:transparent;border:1px solid transparent;color:var(--muted);padding:8px 12px;border-radius:999px;cursor:pointer}
   .tabs button.on{color:var(--text);border-color:var(--line);background:#18233a}
   .user{color:var(--muted);font-size:13px}
   .ghost{background:#18233a;border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:8px;cursor:pointer}
+  .ghost:disabled,.primary:disabled{opacity:.45;cursor:not-allowed}
   main{padding:18px 20px 28px}
   .grid{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
   h2{margin:0 0 10px;font-size:15px;color:#c9d4ea}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+  th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
   th{color:var(--muted);font-weight:600}
   input,select{width:100%;background:#0b1220;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;margin:4px 0 10px}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -29,10 +30,14 @@
   .mono{font-family:Consolas,"Courier New",monospace}
   .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#1b2a22;color:var(--ok)}
   .tag.bad{background:#2a1518;color:var(--bad)}
+  .tag.warn{background:#2c2414;color:var(--warn)}
   .login{max-width:400px;margin:12vh auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
   .err{color:var(--bad);min-height:18px;font-size:13px}
-  .kpi{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+  .kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
   .kpi .panel{padding:12px}.kpi b{display:block;font-size:22px;margin-top:4px}
+  .lockbar{border:1px solid #4a2c2c;background:#241418;color:#ffb0b0;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px}
+  .hint{color:var(--muted);font-size:12px;margin:6px 0 10px;line-height:1.6}
+  .scroll{max-height:420px;overflow:auto}
 </style>
 </head>
 <body>
@@ -56,11 +61,18 @@ createApp({
     const user=ref(localStorage.getItem('slicegate_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const slices=ref([]), releases=ref([]), watermarks=ref([]);
+    const bookings=ref([]), deviations=ref([]), frozen=ref([]);
     const form=ref({slice_no:'SL-2026-11-03-east',biz_date:'2026-11-03',partition_key:'east',row_count:1000,expected_count:1000});
     const releaseSliceId=ref(1), consumer=ref('ads_order');
-    const nav=['切片登记','完整度裁决','下游放行','消费水位'];
+    const bookingForm=ref({biz_date:'2026-11-03',close_at:'2026-11-03T18:00:00',policy:'甲',note:''});
+    const frozenForm=ref({biz_date:'2026-11-02',slice_no:'SL-2026-11-02-late',partition_key:'east',row_count:120,expected_count:1000,note:''});
+    const detailDate=ref(''), detail=ref(null);
+    const nav=['切片登记','完整度裁决','下游放行','消费水位','切窗预约','关日详情'];
     const completeCnt=computed(()=>slices.value.filter(s=>s.completeness==='完整').length);
     const openCnt=computed(()=>slices.value.filter(s=>s.release_status!=='已放行').length);
+    const closedCnt=computed(()=>bookings.value.filter(b=>b.closed).length);
+    const bookingMap=computed(()=>Object.fromEntries(bookings.value.map(b=>[b.biz_date,b])));
+    function closedOf(bizDate){const b=bookingMap.value[bizDate];return b&&b.closed;}
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -85,13 +97,45 @@ createApp({
       releases.value=Array.isArray(rel.items)?rel.items:[];
       const w=await loadJson('/api/watermarks'); if(w===null) return;
       watermarks.value=Array.isArray(w.items)?w.items:[];
+      const b=await loadJson('/api/window/bookings'); if(b===null) return;
+      bookings.value=Array.isArray(b.items)?b.items:[];
+      const d=await loadJson('/api/window/deviations'); if(d===null) return;
+      deviations.value=Array.isArray(d.items)?d.items:[];
+      const f=await loadJson('/api/window/frozen-enrollments'); if(f===null) return;
+      frozen.value=Array.isArray(f.items)?f.items:[];
       if(slices.value.length) releaseSliceId.value=slices.value[0].id;
+      if(bookings.value.length&&!detailDate.value) detailDate.value=bookings.value[0].biz_date;
     }
     async function createSlice(){actionErr.value='';const r=await fetch('/api/slices',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'失败';await refresh();}
-    async function evaluate(id){await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});await refresh();}
+    async function evaluate(id){actionErr.value='';const r=await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});const j=await r.json().catch(()=>({}));if(!r.ok)actionErr.value=j.detail||'失败';await refresh();}
     async function doRelease(){actionErr.value='';const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value})});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'放行失败';await refresh();}
+    async function createBooking(){
+      actionErr.value='';
+      const r=await fetch('/api/window/bookings',{method:'POST',headers:auth(),body:JSON.stringify(bookingForm.value)});
+      const j=await r.json();if(!r.ok){actionErr.value=j.detail||'预约失败';return;}
+      actionErr.value=''; detailDate.value=bookingForm.value.biz_date; await refresh(); await loadDetail();
+    }
+    async function enrollFrozen(){
+      actionErr.value='';
+      const r=await fetch('/api/window/frozen-enrollments',{method:'POST',headers:auth(),body:JSON.stringify(frozenForm.value)});
+      const j=await r.json();if(!r.ok){actionErr.value=j.detail||'冻结报名失败';return;}
+      await refresh(); await loadDetail();
+    }
+    async function loadDetail(){
+      if(!detailDate.value){detail.value=null;return;}
+      const r=await fetch('/api/window/bookings/'+encodeURIComponent(detailDate.value),{headers:auth()});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok){actionErr.value=j.detail||'关日详情加载失败';detail.value=null;return;}
+      detail.value=j;
+    }
+    function pickTab(i){tab.value=i;actionErr.value='';if(i===5)loadDetail();}
+    const releaseSlice=computed(()=>slices.value.find(s=>s.id===releaseSliceId.value));
+    const releaseLocked=computed(()=>releaseSlice.value?closedOf(releaseSlice.value.biz_date):false);
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,form,releaseSliceId,consumer,actionErr,completeCnt,openCnt,login,logout,createSlice,evaluate,doRelease};
+    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,bookings,deviations,frozen,
+      form,releaseSliceId,consumer,bookingForm,frozenForm,detailDate,detail,
+      completeCnt,openCnt,closedCnt,closedOf,releaseLocked,
+      login,logout,createSlice,evaluate,doRelease,createBooking,enrollFrozen,loadDetail,pickTab};
   },
   template:`
   <div v-if="!token" class="login">
@@ -101,8 +145,8 @@ createApp({
   </div>
   <div v-if="token">
     <div class="top">
-      <div class="brand">日切放行<small>切片 → 完整度 → 放行 → 水位</small></div>
-      <div class="tabs"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{n}}</button></div>
+      <div class="brand">日切放行<small>切片 → 完整度 → 放行 → 水位 → 切窗预约</small></div>
+      <div class="tabs"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="pickTab(i)">{{n}}</button></div>
       <div class="user">{{user}}</div><button class="ghost" @click="logout">退出</button>
     </div>
     <main>
@@ -110,47 +154,56 @@ createApp({
         <div class="panel">切片总数<b class="mono">{{slices.length}}</b></div>
         <div class="panel">已完整<b class="mono">{{completeCnt}}</b></div>
         <div class="panel">未放行<b class="mono">{{openCnt}}</b></div>
+        <div class="panel">切窗已关闭<b class="mono">{{closedCnt}}/{{bookings.length}}</b></div>
       </div>
       <div v-show="tab===0" class="grid">
         <div class="panel">
           <h2>在途切片</h2>
-          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th></th></tr></thead>
+          <div class="scroll"><table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th>切窗</th><th></th></tr></thead>
           <tbody><tr v-for="s in slices" :key="s.id">
             <td class="mono">{{s.slice_no}}</td><td>{{s.biz_date}} / {{s.partition_key}}</td>
             <td class="mono">{{s.row_count}}/{{s.expected_count}}</td>
             <td><span class="tag" :class="{bad:s.completeness!=='完整'}">{{s.completeness}}</span></td>
-            <td><button class="ghost" @click="evaluate(s.id)">重裁</button></td>
-          </tr></tbody></table>
+            <td><span v-if="closedOf(s.biz_date)" class="tag bad">已关日·只读</span><span v-else class="tag">开放</span></td>
+            <td><button class="ghost" :disabled="closedOf(s.biz_date)" :title="closedOf(s.biz_date)?'切窗到点，服务端闩死只读':''" @click="evaluate(s.id)">重裁</button></td>
+          </tr></tbody></table></div>
         </div>
         <div class="panel">
           <h2>登记切片</h2>
-          <div class="row"><div><label>切片号</label><input v-model="form.slice_no"/></div><div><label>业务日</label><input v-model="form.biz_date"/></div></div>
-          <div class="row"><div><label>分区</label><input v-model="form.partition_key"/></div><div><label>实收</label><input type="number" v-model.number="form.row_count"/></div></div>
-          <label>期望</label><input type="number" v-model.number="form.expected_count"/>
-          <button class="primary" @click="createSlice">写入登记</button>
+          <div v-if="closedOf(form.biz_date)" class="lockbar">业务日 {{form.biz_date}} 切窗已到点关闭：该日一切写入被服务端闩死，本表单仅留作只读展示。</div>
+          <div class="row"><div><label>切片号</label><input v-model="form.slice_no" :disabled="closedOf(form.biz_date)"/></div><div><label>业务日</label><input v-model="form.biz_date" :disabled="closedOf(form.biz_date)"/></div></div>
+          <div class="row"><div><label>分区</label><input v-model="form.partition_key" :disabled="closedOf(form.biz_date)"/></div><div><label>实收</label><input type="number" v-model.number="form.row_count" :disabled="closedOf(form.biz_date)"/></div></div>
+          <label>期望</label><input type="number" v-model.number="form.expected_count" :disabled="closedOf(form.biz_date)"/>
+          <button class="primary" :disabled="closedOf(form.biz_date)" @click="createSlice">写入登记</button>
           <div class="err">{{actionErr}}</div>
         </div>
       </div>
       <div v-show="tab===1" class="panel">
         <h2>完整度裁决</h2>
-        <table><thead><tr><th>切片</th><th>缺口</th><th>结论</th><th>放行态</th></tr></thead>
+        <table><thead><tr><th>切片</th><th>缺口</th><th>结论</th><th>放行态</th><th>切窗</th></tr></thead>
         <tbody><tr v-for="s in slices" :key="'c'+s.id">
           <td class="mono">{{s.slice_no}}</td><td class="mono">{{Math.max(s.expected_count-s.row_count,0)}}</td>
           <td>{{s.completeness}}</td><td>{{s.release_status}}</td>
+          <td><span v-if="closedOf(s.biz_date)" class="tag bad">已关日</span><span v-else class="tag">开放</span></td>
         </tr></tbody></table>
       </div>
       <div v-show="tab===2" class="grid">
         <div class="panel">
           <h2>申请放行</h2>
-          <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.completeness}}）</option></select>
-          <label>下游</label><input v-model="consumer"/>
-          <button class="primary" @click="doRelease">放行</button>
+          <div v-if="releaseLocked" class="lockbar">所选切片业务日切窗已关闭：成功放行写入与水位推进一概拒绝，请求会被服务端记拒绝流水并登记口径偏差。</div>
+          <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.biz_date}} · {{s.completeness}}）</option></select>
+          <label>下游</label><input v-model="consumer" :disabled="releaseLocked"/>
+          <button class="primary" :disabled="releaseLocked" @click="doRelease">放行</button>
           <div class="err">{{actionErr}}</div>
         </div>
         <div class="panel">
           <h2>放行流水</h2>
-          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>时间</th></tr></thead>
-          <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td>{{r.status}}</td><td class="mono">{{r.created_at}}</td></tr></tbody></table>
+          <div class="scroll"><table><thead><tr><th>切片</th><th>业务日</th><th>下游</th><th>结果</th><th>说明</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="r in releases" :key="r.id">
+            <td class="mono">{{r.slice_no}}</td><td class="mono">{{r.biz_date}}</td><td>{{r.consumer}}</td>
+            <td><span class="tag" :class="{bad:r.status!=='成功'}">{{r.status}}</span></td>
+            <td>{{r.note}}</td><td class="mono">{{r.created_at}}</td>
+          </tr></tbody></table></div>
         </div>
       </div>
       <div v-show="tab===3" class="panel">
@@ -158,6 +211,86 @@ createApp({
         <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th></tr></thead>
         <tbody><tr v-for="w in watermarks" :key="w.id"><td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td><td class="mono">{{w.source_slice}}</td></tr></tbody></table>
       </div>
+      <div v-show="tab===4" class="grid">
+        <div class="panel">
+          <h2>预约列表（切窗策略簿）</h2>
+          <p class="hint">策略簿一经写入当日禁止改口；方案甲到点后全只读，方案乙到点后仅迟到冻结区可报名。门闩在服务端，页面禁用仅为提示。</p>
+          <div class="scroll"><table><thead><tr><th>业务日</th><th>关闭时刻</th><th>口径</th><th>状态</th><th>登记人</th><th>旁注</th></tr></thead>
+          <tbody><tr v-for="b in bookings" :key="b.id">
+            <td class="mono">{{b.biz_date}}</td><td class="mono">{{b.close_at}}</td>
+            <td><span class="tag" :class="b.policy==='甲'?'bad':'warn'">方案{{b.policy}}</span></td>
+            <td><span class="tag" :class="{bad:b.closed}">{{b.closed?'已关闭·闩死':'待关闭'}}</span></td>
+            <td>{{b.created_by}}</td><td>{{b.note}}</td>
+          </tr>
+          <tr v-if="!bookings.length"><td colspan="6" class="hint">暂无预约</td></tr></tbody></table></div>
+        </div>
+        <div class="panel">
+          <h2>新建切窗预约</h2>
+          <div class="row"><div><label>业务日</label><input v-model="bookingForm.biz_date"/></div><div><label>关闭时刻</label><input v-model="bookingForm.close_at"/></div></div>
+          <label>关闭口径（甲乙互斥，不可混子窗）</label>
+          <select v-model="bookingForm.policy">
+            <option value="甲">方案甲：到点后全只读，禁止一切成功放行写入与水位推进</option>
+            <option value="乙">方案乙：到点后仅迟到冻结区报名，成功放行与水位仍拒绝</option>
+          </select>
+          <label>策略旁注</label><input v-model="bookingForm.note"/>
+          <button class="primary" @click="createBooking">写入策略簿</button>
+          <div class="err">{{actionErr}}</div>
+          <h2 style="margin-top:16px">迟到冻结区报名（仅方案乙到点后受理）</h2>
+          <div class="row"><div><label>业务日</label><input v-model="frozenForm.biz_date"/></div><div><label>切片号</label><input v-model="frozenForm.slice_no"/></div></div>
+          <div class="row"><div><label>分区</label><input v-model="frozenForm.partition_key"/></div><div><label>实收</label><input type="number" v-model.number="frozenForm.row_count"/></div></div>
+          <label>期望</label><input type="number" v-model.number="frozenForm.expected_count"/>
+          <button class="ghost" @click="enrollFrozen">报名进冻结区</button>
+        </div>
+      </div>
+      <div v-show="tab===5">
+        <div class="panel" style="margin-bottom:14px">
+          <h2>关日详情</h2>
+          <div class="row" style="grid-template-columns:240px 1fr">
+            <div><label>业务日</label>
+              <select v-model="detailDate" @change="loadDetail">
+                <option v-for="b in bookings" :key="b.biz_date" :value="b.biz_date">{{b.biz_date}}（方案{{b.policy}}）</option>
+              </select>
+            </div>
+            <div v-if="detail" style="align-self:center">
+              <span class="tag" :class="detail.booking.closed?'bad':'warn'">{{detail.booking.closed?'已关闭·门闩生效':'待关闭'}}</span>
+              <span class="hint" style="margin-left:8px">关闭时刻 {{detail.booking.close_at}} · 口径 方案{{detail.booking.policy}} · 登记人 {{detail.booking.created_by}}</span>
+            </div>
+          </div>
+          <div v-if="!detail" class="hint">请先在「切窗预约」页为业务日写入策略簿。</div>
+        </div>
+        <template v-if="detail">
+          <div class="grid" style="margin-bottom:14px">
+            <div class="panel">
+              <h2>当日切片</h2>
+              <table><thead><tr><th>切片号</th><th>完整度</th><th>放行态</th></tr></thead>
+              <tbody><tr v-for="s in detail.slices" :key="s.id"><td class="mono">{{s.slice_no}}</td><td>{{s.completeness}}</td><td>{{s.release_status}}</td></tr>
+              <tr v-if="!detail.slices.length"><td colspan="3" class="hint">无切片</td></tr></tbody></table>
+            </div>
+            <div class="panel">
+              <h2>放行流水（与全局流水同源）</h2>
+              <div class="scroll"><table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>说明</th></tr></thead>
+              <tbody><tr v-for="r in detail.releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td>
+                <td><span class="tag" :class="{bad:r.status!=='成功'}">{{r.status}}</span></td><td>{{r.note}}</td></tr>
+              <tr v-if="!detail.releases.length"><td colspan="4" class="hint">无流水</td></tr></tbody></table></div>
+            </div>
+          </div>
+          <div class="grid">
+            <div class="panel">
+              <h2>迟到冻结区（不放行、不推水位）</h2>
+              <table><thead><tr><th>切片号</th><th>分区</th><th>实收/期望</th><th>登记人</th></tr></thead>
+              <tbody><tr v-for="f in detail.frozen" :key="f.id"><td class="mono">{{f.slice_no}}</td><td>{{f.partition_key}}</td><td class="mono">{{f.row_count}}/{{f.expected_count}}</td><td>{{f.created_by}}</td></tr>
+              <tr v-if="!detail.frozen.length"><td colspan="4" class="hint">无冻结报名</td></tr></tbody></table>
+            </div>
+            <div class="panel">
+              <h2>切窗口径偏差登记</h2>
+              <div class="scroll"><table><thead><tr><th>类型</th><th>详情</th><th>操作人</th><th>时间</th></tr></thead>
+              <tbody><tr v-for="d in detail.deviations" :key="d.id"><td><span class="tag bad">{{d.deviation_type}}</span></td><td>{{d.detail}}</td><td>{{d.operator}}</td><td class="mono">{{d.created_at}}</td></tr>
+              <tr v-if="!detail.deviations.length"><td colspan="4" class="hint">无偏差</td></tr></tbody></table></div>
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="err" style="margin-top:10px">{{tab===5?actionErr:''}}</div>
     </main>
   </div>`
 }).mount('#app');
